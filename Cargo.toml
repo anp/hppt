@@ -1,0 +1,21 @@
+[package]
+name = "hppt"
+version = "0.1.0"
+authors = ["Adam Perry <adam.n.perry@gmail.com>"]
+description = "Basic HTTP static file server."
+
+[dependencies]
+chrono = "0.2"
+clap = "2.10"
+crossbeam = "0.2"
+env_logger = "0.3"
+log = "0.3"
+mioco = "0.8"
+
+[dev-dependencies]
+lazy_static = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+debug = false
