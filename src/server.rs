@@ -113,17 +113,11 @@ fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
                             let file = find_file_relative(&root_dir, Path::new(uri));
 
                             match file {
-                                Ok(Some(f)) => {
-                                    // no I/O error, and we found the file
+                                Some(f) => {
                                     (Status::Ok, Some(f))
                                 }
-                                Ok(None) => {
-                                    // no I/O error, did not find the file
+                                None => {
                                     (Status::NotFound, None)
-                                }
-                                Err(why) => {
-                                    error!("I/O error reading {:?}, reason: {:?}", uri, why);
-                                    (Status::InternalServerError, None)
                                 }
                             }
 
