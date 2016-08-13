@@ -290,7 +290,7 @@ mod test {
     }
 
     #[test]
-    fn file_contents() {
+    fn file_contents_text() {
         let server = TestServerHandle::new(8082);
 
         let filename = "Cargo.toml";
@@ -305,6 +305,24 @@ mod test {
         File::open(&filename).unwrap().read_to_end(&mut expected).unwrap();
 
         check_bytes_utf8(&expected, &response);
+    }
+
+    #[test]
+    fn file_contents_binary() {
+        let server = TestServerHandle::new(8087);
+
+        let filename = "test/1k.bin";
+
+        let response = server.make_request(&format!("GET /{} HTTP/1.1", &filename).as_bytes());
+
+        let mut expected = Vec::new();
+
+        // need to prepopulate the expected response headers before the file data
+        expected.extend_from_slice(b"HTTP/1.1 200 OK\r\n\r\n");
+
+        File::open(&filename).unwrap().read_to_end(&mut expected).unwrap();
+
+        assert_eq!(expected, response);
     }
 
     #[test]
