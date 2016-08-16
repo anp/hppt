@@ -20,7 +20,7 @@ pub fn find_file_relative(root_dir: &Path, uri: &Path) -> Option<File> {
     };
 
     if canonical != full_path {
-        info!("Mismatched canonical ({:?}) and provided ({:?})", canonical, full_path);
+        debug!("Mismatched canonical ({:?}) and provided ({:?})", canonical, full_path);
         return None;
     }
 
