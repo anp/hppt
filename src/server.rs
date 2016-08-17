@@ -10,7 +10,7 @@ use mioco::tcp::TcpListener;
 use error::*;
 use files::find_file_relative;
 use request::{Method, Request};
-use response::{Response, Status};
+use response::{ContentType, Response, Status};
 
 pub type NThreads = usize;
 
@@ -85,11 +85,11 @@ fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
         buf_offset += bytes_read;
 
         // now that we have a potential request, handle the request
-        let (status, mut reader) = {
+        let (status, mut reader, content_type) = {
 
             // handle full buffer
             if buf_offset == buf.len() {
-                (Status::RequestEntityTooLarge, None)
+                (Status::RequestEntityTooLarge, None, None)
 
             } else if bytes_read == 0 {
 
@@ -98,7 +98,7 @@ fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
 
                 // if EOF has been reached but we still got an incomplete request on the last loop,
                 // then the request is probably invalid
-                (Status::BadRequest, None)
+                (Status::BadRequest, None, None)
 
             } else {
                 let request = Request::from_bytes(&buf[..buf_offset]);
@@ -113,17 +113,13 @@ fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
                             let file = find_file_relative(&root_dir, Path::new(uri));
 
                             match file {
-                                Some(f) => {
-                                    (Status::Ok, Some(f))
-                                }
-                                None => {
-                                    (Status::NotFound, None)
-                                }
+                                Some(f) => (Status::Ok, Some(f), Some(ContentType::from_path(uri))),
+                                None => (Status::NotFound, None, None),
                             }
 
                         } else {
                             // we don't support anything other than GET right now
-                            (Status::NotImplemented, None)
+                            (Status::NotImplemented, None, None)
                         }
                     }
 
@@ -131,12 +127,12 @@ fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
                     Err(why) => {
                         match why {
                             HpptError::UnsupportedHttpVersion => {
-                                (Status::HttpVersionNotSupported, None)
+                                (Status::HttpVersionNotSupported, None, None)
                             }
-                            HpptError::Parsing => (Status::BadRequest, None),
+                            HpptError::Parsing => (Status::BadRequest, None, None),
                             HpptError::IoError(why) => {
                                 error!("Internal I/O error: {:?}", why);
-                                (Status::InternalServerError, None)
+                                (Status::InternalServerError, None, None)
                             }
                             // if the request doesn't have enough tokens (i.e. is an incomplete
                             // request) then we'll loop again to add more to the buffer
@@ -149,7 +145,7 @@ fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
 
         let response = Response::new(status);
 
-        match response.send(&mut connection, reader.as_mut()) {
+        match response.send(&mut connection, reader.as_mut(), content_type) {
             Ok(()) => {
                 // TODO debug log request
                 return;
@@ -286,7 +282,8 @@ mod test {
 
         let response = server.make_request(b"GET /DOES_NOT_EXIST HTTP/1.1");
 
-        check_bytes_utf8(b"HTTP/1.1 404 Not Found\r\n\r\n", &response);
+        check_bytes_utf8(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+                         &response);
     }
 
     #[test]
@@ -300,7 +297,33 @@ mod test {
         let mut expected = Vec::new();
 
         // need to prepopulate the expected response headers before the file data
-        expected.extend_from_slice(b"HTTP/1.1 200 OK\r\n\r\n");
+        expected.extend_from_slice(b"HTTP/1.1 200 OK\r
+Content-Length: 345\r
+Content-Type: text/plain\r
+\r
+");
+
+        File::open(&filename).unwrap().read_to_end(&mut expected).unwrap();
+
+        check_bytes_utf8(&expected, &response);
+    }
+
+    #[test]
+    fn file_contents_html() {
+        let server = TestServerHandle::new(8090);
+
+        let filename = "test/foo.html";
+
+        let response = server.make_request(&format!("GET /{} HTTP/1.1", &filename).as_bytes());
+
+        let mut expected = Vec::new();
+
+        // need to prepopulate the expected response headers before the file data
+        expected.extend_from_slice(b"HTTP/1.1 200 OK\r
+Content-Length: 28\r
+Content-Type: text/html\r
+\r
+");
 
         File::open(&filename).unwrap().read_to_end(&mut expected).unwrap();
 
@@ -318,11 +341,15 @@ mod test {
         let mut expected = Vec::new();
 
         // need to prepopulate the expected response headers before the file data
-        expected.extend_from_slice(b"HTTP/1.1 200 OK\r\n\r\n");
+        expected.extend_from_slice(b"HTTP/1.1 200 OK\r
+Content-Length: 1024\r
+Content-Type: application/octet-stream\r
+\r
+");
 
         File::open(&filename).unwrap().read_to_end(&mut expected).unwrap();
 
-        assert_eq!(expected, response);
+        check_bytes_utf8(&expected, &response);
     }
 
     #[test]
@@ -333,7 +360,11 @@ mod test {
         let mut expected = Vec::new();
 
         // need to prepopulate the expected response headers before the file data
-        expected.extend_from_slice(b"HTTP/1.1 200 OK\r\n\r\n");
+        expected.extend_from_slice(b"HTTP/1.1 200 OK\r
+Content-Length: 345\r
+Content-Type: text/plain\r
+\r
+");
 
         File::open(&filename).unwrap().read_to_end(&mut expected).unwrap();
 
@@ -361,20 +392,19 @@ mod test {
     fn unimplemented() {
         let server = TestServerHandle::new(8084);
 
-        let unsupported_requests = [
-            "PUT / HTTP/1.1",
-            "OPTIONS / HTTP/1.1",
-            "HEAD / HTTP/1.1",
-            "POST / HTTP/1.1",
-            "PUT / HTTP/1.1",
-            "DELETE / HTTP/1.1",
-            "TRACE / HTTP/1.1",
-            "CONNECT / HTTP/1.1",
-        ];
+        let unsupported_requests = ["PUT / HTTP/1.1",
+                                    "OPTIONS / HTTP/1.1",
+                                    "HEAD / HTTP/1.1",
+                                    "POST / HTTP/1.1",
+                                    "PUT / HTTP/1.1",
+                                    "DELETE / HTTP/1.1",
+                                    "TRACE / HTTP/1.1",
+                                    "CONNECT / HTTP/1.1"];
 
         for request in unsupported_requests.iter() {
             let response = server.make_request(&request.as_bytes());
-            check_bytes_utf8(b"HTTP/1.1 501 Not Implemented\r\n\r\n", &response);
+            check_bytes_utf8(b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n",
+                             &response);
         }
 
     }
@@ -385,13 +415,17 @@ mod test {
 
         let response = server.make_request(b"GET / HTTP/1.0");
 
-        check_bytes_utf8(b"HTTP/1.1 505 HTTP Version not supported\r\n\r\n", &response);
+        check_bytes_utf8(b"HTTP/1.1 505 HTTP Version not supported\r\nContent-Length: 0\r\n\r\n",
+                         &response);
     }
 
     fn check_bytes_utf8(expected: &[u8], response: &[u8]) {
+        let expected = Vec::from(expected);
+        let response = Vec::from(response);
+
         if expected != response {
-            let expected = str::from_utf8(&expected).unwrap();
-            let response = str::from_utf8(&response).unwrap();
+            let expected = String::from_utf8_lossy(&expected);
+            let response = String::from_utf8_lossy(&response);
 
             assert_eq!(response, expected);
         }

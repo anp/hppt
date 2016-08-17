@@ -63,13 +63,14 @@ impl<'buf> Request<'buf> {
             Some(mut u) => {
                 // URIs must have at least one character
                 if u.len() > 0 {
-                    // TODO validate that URI has a protocol and known domain/is a relative path/etc.
+                    // TODO validate URI has a protocol and known domain/is a relative path/etc.
 
-                    // joining this uri onto a filesystem path won't work if it has a preceding slash
+                    // joining this uri onto a filesystem path won't work if has a preceding slash
                     if u[0] == b'/' {
                         u = &u[1..];
                     }
 
+                    // FIXME: not compat on windows
                     match from_utf8(u) {
                         Ok(s) => Uri(s),
                         Err(_) => return Err(HpptError::Parsing),
@@ -80,7 +81,7 @@ impl<'buf> Request<'buf> {
                     // space-separated token but it's 0-length
                     return Err(HpptError::Parsing);
                 }
-            },
+            }
             None => return Err(HpptError::IncompleteRequest),
         };
 
