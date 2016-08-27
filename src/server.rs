@@ -1,9 +1,8 @@
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
-use crossbeam::sync::MsQueue;
 use mioco;
 use mioco::tcp::TcpListener;
 
@@ -18,7 +17,7 @@ const BUF_SIZE: usize = 1024; // 1KB
 
 pub fn run(addr: SocketAddr,
            root_dir: &Path,
-           shutdown: Arc<MsQueue<u8>>,
+           shutdown: Receiver<()>,
            num_threads: NThreads)
            -> HpptResult<()> {
     let listener = try!(TcpListener::bind(&addr));
@@ -27,35 +26,21 @@ pub fn run(addr: SocketAddr,
     let root_dir = root_dir.to_path_buf();
 
     mioco::start_threads(num_threads, move || {
-            // spawn one listener coroutine per event loop worker
-            for _ in 0..num_threads {
+            loop {
+                // if we get a shutdown notice, stop listening for requests
+                if let Ok(()) = shutdown.try_recv() {
+                    break;
+                }
 
-                // need a copy of the listener and content path for our multiple listener threads
+                // this will block the coroutine until a connection is available
+                let connection = listener.accept().unwrap();
                 let root_dir = root_dir.clone();
-                let local_listener = listener.try_clone().unwrap();
 
-                // the shutdown queue needs to be 'static, so we'll clone the Arc
-                let shutdown = shutdown.clone();
+                debug!("Connection established with {:?}",
+                       connection.peer_addr().unwrap());
 
-                mioco::spawn(move || {
-                    loop {
-                        // if we get a shutdown notice, stop listening for requests
-                        if let Some(_) = shutdown.try_pop() {
-                            break;
-                        }
-
-                        // this will block the coroutine until a connection is available
-                        let connection = local_listener.accept().unwrap();
-                        let root_dir = root_dir.clone();
-
-                        debug!("Connection established with {:?}",
-                               connection.peer_addr().unwrap());
-
-                        // once we have a connection, handle the request
-                        mioco::spawn(|| parse_and_handle_request(connection, root_dir));
-                    }
-                });
-
+                // once we have a connection, handle the request
+                mioco::spawn(move || parse_and_handle_request(connection, root_dir));
             }
         })
         .unwrap();
@@ -166,11 +151,9 @@ mod test {
     use std::path::Path;
     use std::str;
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::mpsc;
     use std::thread::{JoinHandle, sleep, spawn};
     use std::time::Duration;
-
-    use crossbeam::sync::MsQueue;
 
     use ::init_logging;
     use error::HpptResult;
@@ -182,7 +165,7 @@ mod test {
     struct TestServerHandle {
         num_threads: usize,
         address: SocketAddr,
-        queue: Arc<MsQueue<u8>>,
+        queue: mpsc::Sender<()>,
         server: Option<JoinHandle<HpptResult<()>>>,
     }
 
@@ -197,9 +180,7 @@ mod test {
             let num_test_threads = 2;
             let test_server_address = format!("127.0.0.1:{}", port);
 
-            let queue = Arc::new(MsQueue::new());
-            let server_queue = queue.clone();
-
+            let (send, recv) = mpsc::channel();
             let addr = SocketAddr::from_str(&test_server_address).unwrap();
 
             debug!("Initializing test server at {} with {} threads...",
@@ -209,7 +190,7 @@ mod test {
             let server = spawn(move || {
                 run(addr,
                     &Path::new(env!("CARGO_MANIFEST_DIR")),
-                    server_queue,
+                    recv,
                     num_test_threads)
             });
 
@@ -221,7 +202,7 @@ mod test {
             TestServerHandle {
                 num_threads: num_test_threads,
                 address: addr,
-                queue: queue.clone(),
+                queue: send,
                 server: Some(server),
             }
         }
@@ -248,7 +229,7 @@ mod test {
                    self.address);
 
             for _ in 0..(self.num_threads * 3) {
-                self.queue.push(0); // kill a coroutine, several times over
+                self.queue.send(()).unwrap(); // kill a coroutine, several times over
             }
 
             // try to get the coroutines to eat the poison pills

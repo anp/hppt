@@ -9,7 +9,6 @@ extern crate mioco;
 
 extern crate chrono;
 extern crate clap;
-extern crate crossbeam;
 extern crate env_logger;
 
 mod error;
@@ -21,11 +20,10 @@ mod server;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::mpsc;
 
 use chrono::Local;
 use clap::{App, Arg};
-use crossbeam::sync::MsQueue;
 use env_logger::LogBuilder;
 use log::{LogLevelFilter, LogRecord};
 
@@ -84,10 +82,10 @@ fn main() {
 
     let content_dir = PathBuf::from(&args.value_of("SERVER_ROOT").unwrap());
 
-    let shutdown = Arc::new(MsQueue::new());
+    let (_, recv) = mpsc::channel();
 
     // will block until exited or until shutdown queue is filled with num_threads items
-    match server::run(listen_addr, &content_dir, shutdown, num_threads) {
+    match server::run(listen_addr, &content_dir, recv, num_threads) {
         Ok(()) => (),
         Err(why) => error!("Error running server: {:?}", why),
     }
