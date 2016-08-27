@@ -229,7 +229,7 @@ mod test {
                    self.address);
 
             for _ in 0..(self.num_threads * 3) {
-                self.queue.send(()).unwrap(); // kill a coroutine, several times over
+                let _ = self.queue.send(()); // kill a coroutine, several times over
             }
 
             // try to get the coroutines to eat the poison pills
