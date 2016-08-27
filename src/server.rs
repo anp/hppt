@@ -1,3 +1,5 @@
+use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -12,8 +14,6 @@ use request::{Method, Request};
 use response::{ContentType, Response, Status};
 
 pub type NThreads = usize;
-
-const BUF_SIZE: usize = 1024; // 1KB
 
 pub fn run(addr: SocketAddr,
            root_dir: &Path,
@@ -40,7 +40,7 @@ pub fn run(addr: SocketAddr,
                        connection.peer_addr().unwrap());
 
                 // once we have a connection, handle the request
-                mioco::spawn(move || parse_and_handle_request(connection, root_dir));
+                mioco::spawn(move || handle_request(connection, root_dir));
             }
         })
         .unwrap();
@@ -49,98 +49,61 @@ pub fn run(addr: SocketAddr,
     Ok(())
 }
 
-fn parse_and_handle_request<C>(mut connection: C, root_dir: PathBuf)
+fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
     where C: Read + Write
 {
-    let mut buf_offset = 0;
-    let mut buf = [0u8; BUF_SIZE];
+    let (status, req_type) = match Request::from_bytes(&mut connection) {
+        // TODO route requests here
+        Ok(req) => handle_file_request(req, &root_dir),
 
-    'readreq: loop {
-
-        // read from the least read offset until the buffer is either full
-        // or we're out of bytes to read
-        let bytes_read = match connection.read(&mut buf[buf_offset..]) {
-            Ok(n) => n,
-            Err(why) => {
-                error!("Unable to read from socket: {:?}", why);
-                return;
-            }
-        };
-
-        buf_offset += bytes_read;
-
-        // now that we have a potential request, handle the request
-        let (status, mut reader, content_type) = {
-
-            // handle full buffer
-            if buf_offset == buf.len() {
-                (Status::RequestEntityTooLarge, None, None)
-
-            } else if bytes_read == 0 {
-
-                // the connection may produce further bytes down the line,
-                // but is probably not going to
-
-                // if EOF has been reached but we still got an incomplete request on the last loop,
-                // then the request is probably invalid
-                (Status::BadRequest, None, None)
-
-            } else {
-                let request = Request::from_bytes(&buf[..buf_offset]);
-
-                match request {
-
-                    // the request parsed successfully
-                    Ok(req) => {
-
-                        if req.method() == Method::Get {
-                            let uri = &*req.uri();
-                            let file = find_file_relative(&root_dir, Path::new(uri));
-
-                            match file {
-                                Some(f) => (Status::Ok, Some(f), Some(ContentType::from_path(uri))),
-                                None => (Status::NotFound, None, None),
-                            }
-
-                        } else {
-                            // we don't support anything other than GET right now
-                            (Status::NotImplemented, None, None)
-                        }
-                    }
-
-                    // we couldn't parse the request
-                    Err(why) => {
-                        match why {
-                            HpptError::UnsupportedHttpVersion => {
-                                (Status::HttpVersionNotSupported, None, None)
-                            }
-                            HpptError::Parsing => (Status::BadRequest, None, None),
-                            HpptError::IoError(why) => {
-                                error!("Internal I/O error: {:?}", why);
-                                (Status::InternalServerError, None, None)
-                            }
-                            // if the request doesn't have enough tokens (i.e. is an incomplete
-                            // request) then we'll loop again to add more to the buffer
-                            HpptError::IncompleteRequest => continue 'readreq,
-                        }
-                    }
+        Err(why) => {
+            match why {
+                HpptError::UnsupportedHttpVersion => {
+                    (Status::HttpVersionNotSupported, RequestType::Error)
                 }
-            }
-        };
-
-        let response = Response::new(status);
-
-        match response.send(&mut connection, reader.as_mut(), content_type) {
-            Ok(()) => {
-                // TODO debug log request
-                return;
-            }
-            Err(_why) => {
-                // TODO error log failure
-                return;
+                HpptError::Parsing => (Status::BadRequest, RequestType::Error),
+                HpptError::IoError(why) => {
+                    error!("Internal I/O error: {:?}", why);
+                    (Status::InternalServerError, RequestType::Error)
+                }
+                HpptError::BadRequest => (Status::BadRequest, RequestType::Error),
+                HpptError::RequestTooLarge => (Status::RequestEntityTooLarge, RequestType::Error),
             }
         }
+    };
+
+    let response = Response::new(status);
+
+    match req_type {
+        RequestType::File(mut f, ct) => try!(response.send(&mut connection, f.as_mut(), ct)),
+        RequestType::Error => try!(response.send::<_, &[u8]>(&mut connection, None, None)),
     }
+
+    Ok(())
+}
+
+fn handle_file_request(req: Request, root_dir: &Path) -> (Status, RequestType) {
+    if req.method() == Method::Get {
+        let uri: &OsStr = req.uri().as_ref();
+
+        let file = find_file_relative(root_dir, Path::new(uri));
+
+        match file {
+            Some(f) => {
+                (Status::Ok, RequestType::File(Some(f), Some(ContentType::from_path(req.uri()))))
+            }
+            None => (Status::NotFound, RequestType::Error),
+        }
+
+    } else {
+        // we don't support anything other than GET right now
+        (Status::NotImplemented, RequestType::Error)
+    }
+}
+
+enum RequestType {
+    File(Option<File>, Option<ContentType>),
+    Error,
 }
 
 #[cfg(test)]

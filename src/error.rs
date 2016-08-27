@@ -6,8 +6,9 @@ pub type HpptResult<T> = Result<T, HpptError>;
 // TODO make parsing error more nuanced for reporting to client
 #[derive(Debug)]
 pub enum HpptError {
+    BadRequest,
+    RequestTooLarge,
     Parsing,
-    IncompleteRequest,
     UnsupportedHttpVersion,
     IoError(io::Error),
 }
