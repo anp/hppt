@@ -16,7 +16,7 @@ if __name__ == '__main__':
     print('Content-Type:text/html') #HTML is following
     print()                         #Leave a blank line
     print('<h1>Addition Results</h1>')
-    
+
     try:
         num1=int(input_data["num1"].value)
         num2=int(input_data["num2"].value)
