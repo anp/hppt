@@ -1,5 +1,4 @@
 use std::ffi::OsStr;
-use std::fs::File;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use mioco::tcp::TcpListener;
 use error::*;
 use files::find_file_relative;
 use request::{Method, Request};
-use response::{ContentType, Response, Status};
+use response::{ContentType, Response, ResponseType, Status};
 
 pub type NThreads = usize;
 
@@ -52,37 +51,36 @@ pub fn run(addr: SocketAddr,
 fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
     where C: Read + Write
 {
-    let (status, req_type) = match Request::from_bytes(&mut connection) {
-        // TODO route requests here
+    let (status, resp_type) = match Request::from_bytes(&mut connection) {
+
         Ok(req) => handle_file_request(req, &root_dir),
 
         Err(why) => {
             match why {
                 HpptError::UnsupportedHttpVersion => {
-                    (Status::HttpVersionNotSupported, RequestType::Error)
+                    (Status::HttpVersionNotSupported, ResponseType::General(None, None))
                 }
-                HpptError::Parsing => (Status::BadRequest, RequestType::Error),
+                HpptError::Parsing => (Status::BadRequest, ResponseType::General(None, None)),
                 HpptError::IoError(why) => {
                     error!("Internal I/O error: {:?}", why);
-                    (Status::InternalServerError, RequestType::Error)
+                    (Status::InternalServerError, ResponseType::General(None, None))
                 }
-                HpptError::BadRequest => (Status::BadRequest, RequestType::Error),
-                HpptError::RequestTooLarge => (Status::RequestEntityTooLarge, RequestType::Error),
+                HpptError::BadRequest => (Status::BadRequest, ResponseType::General(None, None)),
+                HpptError::RequestTooLarge => {
+                    (Status::RequestEntityTooLarge, ResponseType::General(None, None))
+                }
             }
         }
     };
 
-    let response = Response::new(status);
+    let response = Response::new(status, resp_type);
 
-    match req_type {
-        RequestType::File(mut f, ct) => try!(response.send(&mut connection, f.as_mut(), ct)),
-        RequestType::Error => try!(response.send::<_, &[u8]>(&mut connection, None, None)),
-    }
+    try!(response.send(&mut connection));
 
     Ok(())
 }
 
-fn handle_file_request(req: Request, root_dir: &Path) -> (Status, RequestType) {
+fn handle_file_request(req: Request, root_dir: &Path) -> (Status, ResponseType) {
     if req.method() == Method::Get {
         let uri: &OsStr = req.uri().as_ref();
 
@@ -90,20 +88,16 @@ fn handle_file_request(req: Request, root_dir: &Path) -> (Status, RequestType) {
 
         match file {
             Some(f) => {
-                (Status::Ok, RequestType::File(Some(f), Some(ContentType::from_path(req.uri()))))
+                (Status::Ok,
+                 ResponseType::General(Some(Box::new(f)), Some(ContentType::from_path(req.uri()))))
             }
-            None => (Status::NotFound, RequestType::Error),
+            None => (Status::NotFound, ResponseType::General(None, None)),
         }
 
     } else {
         // we don't support anything other than GET right now
-        (Status::NotImplemented, RequestType::Error)
+        (Status::NotImplemented, ResponseType::General(None, None))
     }
-}
-
-enum RequestType {
-    File(Option<File>, Option<ContentType>),
-    Error,
 }
 
 #[cfg(test)]
