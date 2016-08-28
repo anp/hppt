@@ -62,24 +62,7 @@ fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
 
                     if is_cgi {
 
-                        info!("CGI request received: {:?}", &req);
-
-                        match build_command(&req, &full_path).output() {
-                            Ok(output) => {
-                                if output.status.success() {
-                                    Response::new(Status::Ok,
-                                                  Some(Box::new(Cursor::new(output.stdout))),
-                                                  None,
-                                                  true)
-                                } else {
-                                    Response::new(Status::BadRequest,
-                                                  Some(Box::new(Cursor::new(output.stdout))),
-                                                  None,
-                                                  true)
-                                }
-                            }
-                            Err(_) => Response::new(Status::BadRequest, None, None, false),
-                        }
+                        build_cgi_response(&req, &full_path)
 
                     } else {
                         Response::new(Status::Ok,
@@ -118,6 +101,25 @@ fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
     try!(response.send(&mut connection));
 
     Ok(())
+}
+
+fn build_cgi_response(req: &Request, exe_file: &Path) -> Response {
+    match build_command(&req, &exe_file).output() {
+        Ok(output) => {
+            if output.status.success() {
+                Response::new(Status::Ok,
+                              Some(Box::new(Cursor::new(output.stdout))),
+                              None,
+                              true)
+            } else {
+                Response::new(Status::BadRequest,
+                              Some(Box::new(Cursor::new(output.stdout))),
+                              None,
+                              true)
+            }
+        }
+        Err(_) => Response::new(Status::BadRequest, None, None, false),
+    }
 }
 
 fn build_command(req: &Request, exe_file: &Path) -> Command {
