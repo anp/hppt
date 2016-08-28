@@ -12,25 +12,9 @@ pub enum Status {
     HttpVersionNotSupported,
 }
 
-pub struct Response {
-    status: Status,
-    response_type: ResponseType,
-}
-
-pub enum ResponseType {
-    General(Option<Box<Read>>, Option<ContentType>),
-}
-
-impl Response {
-    pub fn new(status: Status, response_type: ResponseType) -> Response {
-        Response {
-            status: status,
-            response_type: response_type,
-        }
-    }
-
+impl Status {
     fn status_line(&self) -> &'static [u8] {
-        match self.status {
+        match *self {
             Status::Ok => b"HTTP/1.1 200 OK\r\n",
             Status::BadRequest => b"HTTP/1.1 400 Bad Request\r\n",
             Status::NotFound => b"HTTP/1.1 404 Not Found\r\n",
@@ -38,6 +22,26 @@ impl Response {
             Status::InternalServerError => b"HTTP/1.1 500 Internal Server Error\r\n",
             Status::NotImplemented => b"HTTP/1.1 501 Not Implemented\r\n",
             Status::HttpVersionNotSupported => b"HTTP/1.1 505 HTTP Version not supported\r\n",
+        }
+    }
+}
+
+pub struct Response {
+    status: Status,
+    data: Option<Box<Read>>,
+    content_type: Option<ContentType>,
+}
+
+impl Response {
+    pub fn new(status: Status,
+               data: Option<Box<Read>>,
+               content_type: Option<ContentType>)
+               -> Response {
+
+        Response {
+            status: status,
+            data: data,
+            content_type: content_type,
         }
     }
 
@@ -59,36 +63,32 @@ impl Response {
 
         let mut buf = Vec::with_capacity(100);
 
-        let status = self.status_line();
+        let status = self.status.status_line();
 
-        match self.response_type {
-            ResponseType::General(data, content_type) => {
-                buf.extend_from_slice(status);
+        buf.extend_from_slice(status);
 
-                // TODO write any headers here
-                buf.extend_from_slice(b"Content-Length: ");
+        // TODO write any headers here
+        buf.extend_from_slice(b"Content-Length: ");
 
-                let mut content_buf = Vec::new();
+        let mut content_buf = Vec::new();
 
-                // write message body (usually file contents) if present
-                if let Some(mut data) = data {
-                    // shuffle bytes from the data source (usually a file)
-                    // to the target (usually a socket)
-                    try!(data.read_to_end(&mut content_buf));
-                }
-
-                buf.extend_from_slice(&format!("{}\r\n", content_buf.len()).as_bytes());
-
-                if let Some(ct) = content_type {
-                    buf.extend_from_slice(b"Content-Type: ");
-                    buf.extend_from_slice(ct.as_bytes());
-                    buf.extend_from_slice(b"\r\n");
-                }
-
-                buf.extend_from_slice(b"\r\n");
-                buf.extend_from_slice(&content_buf);
-            }
+        // write message body (usually file contents) if present
+        if let Some(mut data) = self.data {
+            // shuffle bytes from the data source (usually a file)
+            // to the target (usually a socket)
+            try!(data.read_to_end(&mut content_buf));
         }
+
+        buf.extend_from_slice(&format!("{}\r\n", content_buf.len()).as_bytes());
+
+        if let Some(ct) = self.content_type {
+            buf.extend_from_slice(b"Content-Type: ");
+            buf.extend_from_slice(ct.as_bytes());
+            buf.extend_from_slice(b"\r\n");
+        }
+
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(&content_buf);
 
         try!(target.write_all(&buf));
 
@@ -155,8 +155,7 @@ mod test {
 
     #[test]
     fn empty() {
-        let response = Response::new(Status::Ok,
-                                     ResponseType::General(None, Some(ContentType::Text)));
+        let response = Response::new(Status::Ok, None, Some(ContentType::Text));
         let expected = b"HTTP/1.1 200 OK\r
 Content-Length: 0\r
 Content-Type: text/plain\r
@@ -169,9 +168,8 @@ Content-Type: text/plain\r
     #[test]
     fn with_text() {
         let response = Response::new(Status::Ok,
-                                     ResponseType::General(Some(Box::new("ABCDEFGHIJK1234567890"
-                                                             .as_bytes())),
-                                                         Some(ContentType::Text)));
+                                     Some(Box::new("ABCDEFGHIJK1234567890".as_bytes())),
+                                     Some(ContentType::Text));
         let expected = b"HTTP/1.1 200 OK\r
 Content-Length: 21\r
 Content-Type: text/plain\r
@@ -183,7 +181,7 @@ ABCDEFGHIJK1234567890";
 
     #[test]
     fn not_found() {
-        let response = Response::new(Status::NotFound, ResponseType::General(None, None));
+        let response = Response::new(Status::NotFound, None, None);
         let expected = b"HTTP/1.1 404 Not Found\r
 Content-Length: 0\r
 \r

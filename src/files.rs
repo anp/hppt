@@ -1,15 +1,17 @@
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Hide all I/O errors behind an Option. This will mean that any I/O issue will just cause a 404.
 /// Could be handled better, but ideally we don't want to expose permissions issues as a 500.
 ///
 /// Also: checks to make sure canonical path matches requested path. This prevents escaping the
 /// content directory under most circumstances, but also means symlinks won't work anymore.
-pub fn find_file_relative(root_dir: &Path, uri: &Path) -> Option<File> {
+pub fn find_file_relative(root_dir: &Path, uri: &Path) -> Option<(File, PathBuf)> {
     let full_path = root_dir.join(uri);
 
-    debug!("{:?} requested, seeing if it exists in root directory ({:?})...", &full_path, root_dir);
+    debug!("{:?} requested, seeing if it exists in root directory ({:?})...",
+           &full_path,
+           root_dir);
 
     let canonical = match full_path.canonicalize() {
         Ok(p) => p,
@@ -20,7 +22,9 @@ pub fn find_file_relative(root_dir: &Path, uri: &Path) -> Option<File> {
     };
 
     if canonical != full_path {
-        debug!("Mismatched canonical ({:?}) and provided ({:?})", canonical, full_path);
+        debug!("Mismatched canonical ({:?}) and provided ({:?})",
+               canonical,
+               full_path);
         return None;
     }
 
@@ -29,7 +33,9 @@ pub fn find_file_relative(root_dir: &Path, uri: &Path) -> Option<File> {
     if full_path.exists() {
         if full_path.is_file() {
             debug!("{:?} found, returning.", &full_path);
-            File::open(full_path).ok() // if there's an issue opening the file, just say None
+
+            // if there's an issue opening the file, just say None
+            File::open(full_path).ok().map(|f| (f, canonical))
         } else {
             debug!("{:?} found, but is not a file.", &full_path);
             None

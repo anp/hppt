@@ -26,13 +26,13 @@ use chrono::Local;
 use clap::{App, Arg};
 use env_logger::LogBuilder;
 use log::{LogLevelFilter, LogRecord};
+use mioco::tcp::TcpListener;
 
 fn main() {
     let args = App::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about(env!("CARGO_PKG_DESCRIPTION"))
-
         .arg(Arg::with_name("SERVER_ROOT")
             .takes_value(true)
             .index(1)
@@ -49,7 +49,6 @@ fn main() {
                     Err(format!("{} does not exist.", s))
                 }
             }))
-
         .arg(Arg::with_name("LISTEN_ADDRESS")
             .takes_value(true)
             .index(2)
@@ -57,20 +56,19 @@ fn main() {
             .default_value("127.0.0.1:8080")
             .required(true)
             .validator(|s| SocketAddr::from_str(&s).map(|_| ()).map_err(|e| format!("{:?}", e))))
-
         .arg(Arg::with_name("NUM_THREADS")
             .takes_value(true)
             .long("threads")
             .help("Number of threads to use for listening to requests.")
             .required(true)
             .default_value("1")
-            .validator(|s| s.parse::<server::NThreads>().map(|_| ()).map_err(|e| format!("{:?}", e))))
-
+            .validator(|s| {
+                s.parse::<server::NThreads>().map(|_| ()).map_err(|e| format!("{:?}", e))
+            }))
         .arg(Arg::with_name("VERBOSE")
             .short("v")
             .long("verbose")
             .help("Enable debug-level logging."))
-
         .get_matches();
 
     init_logging(args.is_present("VERBOSE"));
@@ -85,7 +83,9 @@ fn main() {
     let (_, recv) = mpsc::channel();
 
     // will block until exited or until shutdown queue is filled with num_threads items
-    match server::run(listen_addr, &content_dir, recv, num_threads) {
+
+    let listener = TcpListener::bind(&listen_addr).unwrap();
+    match server::run(listener, &content_dir, recv, num_threads) {
         Ok(()) => (),
         Err(why) => error!("Error running server: {:?}", why),
     }
@@ -98,7 +98,8 @@ pub fn init_logging(verbose: bool) {
         LogLevelFilter::Info
     };
 
-    let init_result = LogBuilder::new().filter(None, level)
+    let init_result = LogBuilder::new()
+        .filter(None, level)
         .format(|record: &LogRecord| {
             format!("[{} {} {}] {}",
                     record.level(),

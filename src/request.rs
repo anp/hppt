@@ -10,6 +10,7 @@ pub const BUF_SIZE: usize = 1024; // 1KB
 pub struct Request {
     method: Method,
     uri: Uri,
+    query: Option<Query>,
     version: Version,
 }
 
@@ -45,7 +46,7 @@ impl Request {
 
             let bytes = &buf[..buf_offset];
 
-            // the standard says \r\n is the line terminator, but there are many non-conforming impls
+            // standard says \r\n is the line terminator, but there are many non-conforming impls
             // so we'll split on newlines, and then trim the \r
             let mut lines = bytes.split(|&b| b == b'\n')
                 .map(|l| {
@@ -67,29 +68,51 @@ impl Request {
             let mut request_line_tokens = request_line.split(|&b| b == b' ');
 
             let method = match request_line_tokens.next() {
-                Some(m) => match Method::from_bytes(m) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                },
+                Some(m) => {
+                    match Method::from_bytes(m) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    }
+                }
                 None => continue,
             };
 
-            let uri = match request_line_tokens.next() {
+            let (uri, query) = match request_line_tokens.next() {
                 Some(mut u) => {
                     // URIs must have at least one character
                     if u.len() > 0 {
                         // TODO validate URI has a protocol and known domain/is a relative path/etc.
 
-                        // joining this uri onto a filesystem path won't work if has a preceding slash
+                        // joining this uri onto an OS path won't work if has a preceding slash
                         if u[0] == b'/' {
                             u = &u[1..];
                         }
 
-                        // FIXME: not compat on windows
-                        match from_utf8(u) {
-                            Ok(s) => Uri(s.to_string()),
+                        let uri = match from_utf8(u) {
+                            Ok(s) => s,
                             Err(_) => continue,
-                        }
+                        };
+
+                        let mut halves = uri.split('?');
+
+                        let uri = match halves.next() {
+                            Some(u) => Uri(u.to_string()),
+                            None => continue, // we need a first half of the URI
+                        };
+
+                        // but the post ? part of the URI is optional
+                        let query = match halves.next() {
+                            Some(q) => {
+                                if q.len() > 0 {
+                                    Some(Query(q.to_string()))
+                                } else {
+                                    None
+                                }
+                            }
+                            None => None,
+                        };
+
+                        (uri, query)
 
                     } else {
                         // this isn't an incomplete request -- we were able to get the next
@@ -101,17 +124,22 @@ impl Request {
             };
 
             let version = match request_line_tokens.next() {
-                Some(v) => match Version::from_bytes(v) {
-                    Ok(v) => v,
-                    Err(HpptError::UnsupportedHttpVersion) => return Err(HpptError::UnsupportedHttpVersion),
-                    Err(_) => continue,
-                },
+                Some(v) => {
+                    match Version::from_bytes(v) {
+                        Ok(v) => v,
+                        Err(HpptError::UnsupportedHttpVersion) => {
+                            return Err(HpptError::UnsupportedHttpVersion)
+                        }
+                        Err(_) => continue,
+                    }
+                }
                 None => continue,
             };
 
             return Ok(Request {
                 method: method,
                 uri: uri,
+                query: query,
                 version: version,
             });
         }
@@ -130,6 +158,17 @@ impl Request {
 pub struct Uri(String);
 
 impl Deref for Uri {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Query(String);
+
+impl Deref for Query {
     type Target = str;
 
     fn deref(&self) -> &str {
@@ -166,6 +205,19 @@ impl Method {
             _ => Err(HpptError::Parsing),
         }
     }
+
+    pub fn as_bytes(&self) -> &'static str {
+        match *self {
+            Method::Options => "OPTIONS",
+            Method::Get => "GET",
+            Method::Head => "HEAD",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+            Method::Trace => "TRACE",
+            Method::Connect => "CONNECT",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +249,7 @@ mod test {
         let expected = Request {
             method: Method::Get,
             uri: Uri("".to_string()),
+            query: None,
             version: Version::OneDotOne,
         };
 
@@ -207,10 +260,12 @@ mod test {
 
     #[test]
     fn successful_post() {
-        let mut request_bytes = "POST /posturi HTTP/1.1\r\nKey1=Value1&Key2=Value2+SpacedValue\r\n".as_bytes();
+        let mut request_bytes = "POST /posturi HTTP/1.1\r\nKey1=Value1&Key2=Value2+SpacedValue\r\n"
+            .as_bytes();
         let expected = Request {
             method: Method::Post,
             uri: Uri("posturi".to_string()),
+            query: None,
             version: Version::OneDotOne,
         };
 
@@ -221,10 +276,50 @@ mod test {
 
     #[test]
     fn successful_with_headers() {
-        let mut request_bytes = "GET /extended/path HTTP/1.1\r\nAccept-Charset: utf-8\r\n\r\n".as_bytes();
+        let mut request_bytes = "GET /extended/path HTTP/1.1\r\nAccept-Charset: utf-8\r\n\r\n"
+            .as_bytes();
         let expected = Request {
             method: Method::Get,
             uri: Uri("extended/path".to_string()),
+            query: None,
+            version: Version::OneDotOne,
+        };
+
+        let request = Request::from_bytes(&mut request_bytes).unwrap();
+
+        assert_eq!(request, expected);
+    }
+
+    #[test]
+    fn successful_with_query() {
+        let mut request_bytes = "GET /extended/path?key1=val1&key2=val2 HTTP/1.1\r
+Accept-Charset: utf-8\r
+\r
+"
+            .as_bytes();
+        let expected = Request {
+            method: Method::Get,
+            uri: Uri("extended/path".to_string()),
+            query: Some(Query("key1=val1&key2=val2".to_string())),
+            version: Version::OneDotOne,
+        };
+
+        let request = Request::from_bytes(&mut request_bytes).unwrap();
+
+        assert_eq!(request, expected);
+    }
+
+    #[test]
+    fn successful_with_empty_query() {
+        let mut request_bytes = "GET /extended/path? HTTP/1.1\r
+Accept-Charset: utf-8\r
+\r
+"
+            .as_bytes();
+        let expected = Request {
+            method: Method::Get,
+            uri: Uri("extended/path".to_string()),
+            query: None,
             version: Version::OneDotOne,
         };
 
@@ -235,10 +330,12 @@ mod test {
 
     #[test]
     fn successful_get_ignore_body() {
-        let mut request_bytes = "GET /extended/path HTTP/1.1\r\nAccept-Charset: utf-8\r\n\r\n".as_bytes();
+        let mut request_bytes = "GET /extended/path HTTP/1.1\r\nAccept-Charset: utf-8\r\n\r\n"
+            .as_bytes();
         let expected = Request {
             method: Method::Get,
             uri: Uri("extended/path".to_string()),
+            query: None,
             version: Version::OneDotOne,
         };
 

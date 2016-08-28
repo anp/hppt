@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
-use std::io::{Read, Write};
-use std::net::SocketAddr;
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::mpsc::Receiver;
 
 use mioco;
@@ -10,16 +10,15 @@ use mioco::tcp::TcpListener;
 use error::*;
 use files::find_file_relative;
 use request::{Method, Request};
-use response::{ContentType, Response, ResponseType, Status};
+use response::{ContentType, Response, Status};
 
 pub type NThreads = usize;
 
-pub fn run(addr: SocketAddr,
+pub fn run(listener: TcpListener,
            root_dir: &Path,
            shutdown: Receiver<()>,
            num_threads: NThreads)
            -> HpptResult<()> {
-    let listener = try!(TcpListener::bind(&addr));
 
     info!("Server listening on {:?}", listener.local_addr().unwrap());
     let root_dir = root_dir.to_path_buf();
@@ -51,53 +50,85 @@ pub fn run(addr: SocketAddr,
 fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
     where C: Read + Write
 {
-    let (status, resp_type) = match Request::from_bytes(&mut connection) {
+    let response = match Request::from_bytes(&mut connection) {
 
-        Ok(req) => handle_file_request(req, &root_dir),
+        Ok(req) => {
+
+            if req.method() == Method::Get {
+                let uri: &OsStr = req.uri().as_ref();
+
+                if let Some((file, full_path)) = find_file_relative(&root_dir, Path::new(uri)) {
+                    let is_cgi = req.uri().starts_with("cgi-bin");
+
+                    if is_cgi {
+
+                        info!("CGI request received: {:?}", &req);
+
+                        match build_command(&req, &full_path).output() {
+                            Ok(output) => {
+                                Response::new(Status::Ok,
+                                              Some(Box::new(Cursor::new(output.stdout))),
+                                              None)
+                            }
+                            Err(_) => Response::new(Status::BadRequest, None, None),
+                        }
+
+                    } else {
+                        Response::new(Status::Ok,
+                                      Some(Box::new(file)),
+                                      Some(ContentType::from_path(req.uri())))
+                    }
+                } else {
+                    Response::new(Status::NotFound, None, None)
+                }
+
+            } else {
+                // we don't support anything other than GET right now
+                Response::new(Status::NotImplemented, None, None)
+            }
+        }
 
         Err(why) => {
             match why {
                 HpptError::UnsupportedHttpVersion => {
-                    (Status::HttpVersionNotSupported, ResponseType::General(None, None))
+                    Response::new(Status::HttpVersionNotSupported, None, None)
                 }
-                HpptError::Parsing => (Status::BadRequest, ResponseType::General(None, None)),
+                HpptError::Parsing => Response::new(Status::BadRequest, None, None),
                 HpptError::IoError(why) => {
                     error!("Internal I/O error: {:?}", why);
-                    (Status::InternalServerError, ResponseType::General(None, None))
+                    Response::new(Status::InternalServerError, None, None)
                 }
-                HpptError::BadRequest => (Status::BadRequest, ResponseType::General(None, None)),
+                HpptError::BadRequest => Response::new(Status::BadRequest, None, None),
                 HpptError::RequestTooLarge => {
-                    (Status::RequestEntityTooLarge, ResponseType::General(None, None))
+                    Response::new(Status::RequestEntityTooLarge, None, None)
                 }
             }
         }
     };
-
-    let response = Response::new(status, resp_type);
 
     try!(response.send(&mut connection));
 
     Ok(())
 }
 
-fn handle_file_request(req: Request, root_dir: &Path) -> (Status, ResponseType) {
-    if req.method() == Method::Get {
-        let uri: &OsStr = req.uri().as_ref();
+fn build_command(req: &Request, exe_file: &Path) -> Command {
+    let uri: &str = &*req.uri();
+    let mut cmd = Command::new(exe_file);
 
-        let file = find_file_relative(root_dir, Path::new(uri));
+    cmd.env("SERVER_SOFTWARE",
+            concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")));
+    cmd.env("SERVER_NAME", ""); // TODO put the IP address here
+    cmd.env("GATEWAY_INTERFACE", "CGI/1.1");
+    cmd.env("SERVER_PROTOCOL", "HTTP/1.1");
+    cmd.env("SERVER_PORT", ""); // TODO put the listen port here
+    cmd.env("REQUEST_METHOD", req.method().as_bytes());
+    cmd.env("REMOTE_ADDR", ""); // TODO put the client IP address here
 
-        match file {
-            Some(f) => {
-                (Status::Ok,
-                 ResponseType::General(Some(Box::new(f)), Some(ContentType::from_path(req.uri()))))
-            }
-            None => (Status::NotFound, ResponseType::General(None, None)),
-        }
-
-    } else {
-        // we don't support anything other than GET right now
-        (Status::NotImplemented, ResponseType::General(None, None))
+    if let Some(query_str) = uri.rsplit('?').next() {
+        cmd.env("SCRIPT_NAME", query_str);
     }
+
+    cmd
 }
 
 #[cfg(test)]
@@ -111,6 +142,8 @@ mod test {
     use std::sync::mpsc;
     use std::thread::{JoinHandle, sleep, spawn};
     use std::time::Duration;
+
+    use mioco::tcp::TcpListener;
 
     use ::init_logging;
     use error::HpptResult;
@@ -129,23 +162,41 @@ mod test {
     // TODO randomly pick server ports and try them until one binds
 
     impl TestServerHandle {
-        pub fn new(port: u16) -> Self {
+        pub fn new() -> Self {
 
             // set to true to get more verbose debug logging
             init_logging(false);
 
             let num_test_threads = 2;
-            let test_server_address = format!("127.0.0.1:{}", port);
+
+            let mut listener = None;
+            let mut address = None;
+
+            for port in 8080..10_000 {
+                let test_server_address = format!("127.0.0.1:{}", port);
+
+                let addr = SocketAddr::from_str(&test_server_address).unwrap();
+
+                match TcpListener::bind(&addr) {
+                    Ok(l) => {
+                        listener = Some(l);
+                        address = Some(addr);
+                        break;
+                    },
+                    Err(_) => (),
+                }
+            }
+
+            let listener = listener.unwrap();
+            let address = address.unwrap();
 
             let (send, recv) = mpsc::channel();
-            let addr = SocketAddr::from_str(&test_server_address).unwrap();
-
             debug!("Initializing test server at {} with {} threads...",
-                   &test_server_address,
+                   &address,
                    num_test_threads);
 
             let server = spawn(move || {
-                run(addr,
+                run(listener,
                     &Path::new(env!("CARGO_MANIFEST_DIR")),
                     recv,
                     num_test_threads)
@@ -158,7 +209,7 @@ mod test {
 
             TestServerHandle {
                 num_threads: num_test_threads,
-                address: addr,
+                address: address,
                 queue: send,
                 server: Some(server),
             }
@@ -211,12 +262,12 @@ mod test {
 
     #[test]
     fn server_handle_drop() {
-        let _server = TestServerHandle::new(8080);
+        let _server = TestServerHandle::new();
     }
 
     #[test]
     fn not_found() {
-        let server = TestServerHandle::new(8081);
+        let server = TestServerHandle::new();
 
         let response = server.make_request(b"GET /DOES_NOT_EXIST HTTP/1.1");
 
@@ -226,7 +277,7 @@ mod test {
 
     #[test]
     fn file_contents_text() {
-        let server = TestServerHandle::new(8082);
+        let server = TestServerHandle::new();
 
         let filename = "Cargo.toml";
 
@@ -248,7 +299,7 @@ Content-Type: text/plain\r
 
     #[test]
     fn file_contents_html() {
-        let server = TestServerHandle::new(8090);
+        let server = TestServerHandle::new();
 
         let filename = "test/foo.html";
 
@@ -270,7 +321,7 @@ Content-Type: text/html\r
 
     #[test]
     fn file_contents_binary() {
-        let server = TestServerHandle::new(8087);
+        let server = TestServerHandle::new();
 
         let filename = "test/1k.bin";
 
@@ -292,7 +343,7 @@ Content-Type: application/octet-stream\r
 
     #[test]
     fn multiple_requests() {
-        let server = TestServerHandle::new(8086);
+        let server = TestServerHandle::new();
 
         let filename = "Cargo.toml";
         let mut expected = Vec::new();
@@ -316,7 +367,7 @@ Content-Type: text/plain\r
     #[test]
     #[should_panic]
     fn large_request() {
-        let server = TestServerHandle::new(8083);
+        let server = TestServerHandle::new();
 
         let mut request = Vec::new();
         request.extend_from_slice(b"GET /");
@@ -328,7 +379,7 @@ Content-Type: text/plain\r
 
     #[test]
     fn unimplemented() {
-        let server = TestServerHandle::new(8084);
+        let server = TestServerHandle::new();
 
         let unsupported_requests = ["PUT / HTTP/1.1",
                                     "OPTIONS / HTTP/1.1",
@@ -349,11 +400,21 @@ Content-Type: text/plain\r
 
     #[test]
     fn wrong_http_version() {
-        let server = TestServerHandle::new(8085);
+        let server = TestServerHandle::new();
 
         let response = server.make_request(b"GET / HTTP/1.0");
 
         check_bytes_utf8(b"HTTP/1.1 505 HTTP Version not supported\r\nContent-Length: 0\r\n\r\n",
+                         &response);
+    }
+
+    #[test]
+    fn cgi_hello_world() {
+        let server = TestServerHandle::new();
+
+        let response = server.make_request(b"GET /cgi-bin/hello_world.py HTTP/1.1");
+
+        check_bytes_utf8(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\nHello, World!\n",
                          &response);
     }
 
