@@ -66,41 +66,50 @@ fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
 
                         match build_command(&req, &full_path).output() {
                             Ok(output) => {
-                                Response::new(Status::Ok,
-                                              Some(Box::new(Cursor::new(output.stdout))),
-                                              None)
+                                if output.status.success() {
+                                    Response::new(Status::Ok,
+                                                  Some(Box::new(Cursor::new(output.stdout))),
+                                                  None,
+                                                  true)
+                                } else {
+                                    Response::new(Status::BadRequest,
+                                                  Some(Box::new(Cursor::new(output.stdout))),
+                                                  None,
+                                                  true)
+                                }
                             }
-                            Err(_) => Response::new(Status::BadRequest, None, None),
+                            Err(_) => Response::new(Status::BadRequest, None, None, false),
                         }
 
                     } else {
                         Response::new(Status::Ok,
                                       Some(Box::new(file)),
-                                      Some(ContentType::from_path(req.uri())))
+                                      Some(ContentType::from_path(req.uri())),
+                                      false)
                     }
                 } else {
-                    Response::new(Status::NotFound, None, None)
+                    Response::new(Status::NotFound, None, None, false)
                 }
 
             } else {
                 // we don't support anything other than GET right now
-                Response::new(Status::NotImplemented, None, None)
+                Response::new(Status::NotImplemented, None, None, false)
             }
         }
 
         Err(why) => {
             match why {
                 HpptError::UnsupportedHttpVersion => {
-                    Response::new(Status::HttpVersionNotSupported, None, None)
+                    Response::new(Status::HttpVersionNotSupported, None, None, false)
                 }
-                HpptError::Parsing => Response::new(Status::BadRequest, None, None),
+                HpptError::Parsing => Response::new(Status::BadRequest, None, None, false),
                 HpptError::IoError(why) => {
                     error!("Internal I/O error: {:?}", why);
-                    Response::new(Status::InternalServerError, None, None)
+                    Response::new(Status::InternalServerError, None, None, false)
                 }
-                HpptError::BadRequest => Response::new(Status::BadRequest, None, None),
+                HpptError::BadRequest => Response::new(Status::BadRequest, None, None, false),
                 HpptError::RequestTooLarge => {
-                    Response::new(Status::RequestEntityTooLarge, None, None)
+                    Response::new(Status::RequestEntityTooLarge, None, None, false)
                 }
             }
         }
@@ -112,7 +121,6 @@ fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
 }
 
 fn build_command(req: &Request, exe_file: &Path) -> Command {
-    let uri: &str = &*req.uri();
     let mut cmd = Command::new(exe_file);
 
     cmd.env("SERVER_SOFTWARE",
@@ -124,8 +132,9 @@ fn build_command(req: &Request, exe_file: &Path) -> Command {
     cmd.env("REQUEST_METHOD", req.method().as_bytes());
     cmd.env("REMOTE_ADDR", ""); // TODO put the client IP address here
 
-    if let Some(query_str) = uri.rsplit('?').next() {
-        cmd.env("SCRIPT_NAME", query_str);
+    if let Some(ref query_str) = req.query() {
+        let query_str: &str = &*query_str;
+        cmd.env("QUERY_STRING", query_str);
     }
 
     cmd
@@ -182,7 +191,7 @@ mod test {
                         listener = Some(l);
                         address = Some(addr);
                         break;
-                    },
+                    }
                     Err(_) => (),
                 }
             }
@@ -414,7 +423,42 @@ Content-Type: text/plain\r
 
         let response = server.make_request(b"GET /cgi-bin/hello_world.py HTTP/1.1");
 
-        check_bytes_utf8(b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\n\r\nHello, World!\n",
+        check_bytes_utf8(b"HTTP/1.1 200 OK\r
+Content-Type: text/plain\r
+\r
+Hello, World!
+",
+                         &response);
+    }
+
+    #[test]
+    fn cgi_addition_success() {
+        let server = TestServerHandle::new();
+
+        let response = server.make_request(b"GET /cgi-bin/addition.py?num1=1&num2=10 HTTP/1.1");
+
+        check_bytes_utf8(b"HTTP/1.1 200 OK\r
+Content-Type:text/html\r
+\r
+<h1>Addition Results</h1>\r
+<p>1 + 10 = 11</p>\r
+",
+                         &response);
+    }
+
+    #[test]
+    fn cgi_addition_fail() {
+        let server = TestServerHandle::new();
+
+        let response =
+            server.make_request(b"GET /cgi-bin/addition.py?num1=banana&num2=pie HTTP/1.1");
+
+        check_bytes_utf8(b"HTTP/1.1 400 Bad Request\r
+Content-Type:text/html\r
+\r
+<h1>Addition Results</h1>\r
+<p>Sorry, we cannot turn your inputs into integers.</p>\r
+",
                          &response);
     }
 

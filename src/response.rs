@@ -30,18 +30,21 @@ pub struct Response {
     status: Status,
     data: Option<Box<Read>>,
     content_type: Option<ContentType>,
+    data_includes_headers: bool,
 }
 
 impl Response {
     pub fn new(status: Status,
                data: Option<Box<Read>>,
-               content_type: Option<ContentType>)
+               content_type: Option<ContentType>,
+               data_includes_headers: bool)
                -> Response {
 
         Response {
             status: status,
             data: data,
             content_type: content_type,
+            data_includes_headers: data_includes_headers,
         }
     }
 
@@ -61,16 +64,13 @@ impl Response {
 
         // TODO collect these into a local buffer to avoid multiple syscalls
 
-        let mut buf = Vec::with_capacity(100);
+        let mut buf = Vec::with_capacity(1024);
 
         let status = self.status.status_line();
 
         buf.extend_from_slice(status);
 
-        // TODO write any headers here
-        buf.extend_from_slice(b"Content-Length: ");
-
-        let mut content_buf = Vec::new();
+        let mut content_buf = Vec::with_capacity(1024);
 
         // write message body (usually file contents) if present
         if let Some(mut data) = self.data {
@@ -79,15 +79,19 @@ impl Response {
             try!(data.read_to_end(&mut content_buf));
         }
 
-        buf.extend_from_slice(&format!("{}\r\n", content_buf.len()).as_bytes());
+        if !self.data_includes_headers {
+            // TODO write any headers here
+            buf.extend_from_slice(b"Content-Length: ");
+            buf.extend_from_slice(&content_buf.len().to_string().as_bytes());
 
-        if let Some(ct) = self.content_type {
-            buf.extend_from_slice(b"Content-Type: ");
-            buf.extend_from_slice(ct.as_bytes());
-            buf.extend_from_slice(b"\r\n");
+            if let Some(ct) = self.content_type {
+                buf.extend_from_slice(b"\r\nContent-Type: ");
+                buf.extend_from_slice(ct.as_bytes());
+            }
+
+            buf.extend_from_slice(b"\r\n\r\n");
         }
 
-        buf.extend_from_slice(b"\r\n");
         buf.extend_from_slice(&content_buf);
 
         try!(target.write_all(&buf));
@@ -155,7 +159,7 @@ mod test {
 
     #[test]
     fn empty() {
-        let response = Response::new(Status::Ok, None, Some(ContentType::Text));
+        let response = Response::new(Status::Ok, None, Some(ContentType::Text), false);
         let expected = b"HTTP/1.1 200 OK\r
 Content-Length: 0\r
 Content-Type: text/plain\r
@@ -169,7 +173,8 @@ Content-Type: text/plain\r
     fn with_text() {
         let response = Response::new(Status::Ok,
                                      Some(Box::new("ABCDEFGHIJK1234567890".as_bytes())),
-                                     Some(ContentType::Text));
+                                     Some(ContentType::Text),
+                                     false);
         let expected = b"HTTP/1.1 200 OK\r
 Content-Length: 21\r
 Content-Type: text/plain\r
@@ -181,7 +186,7 @@ ABCDEFGHIJK1234567890";
 
     #[test]
     fn not_found() {
-        let response = Response::new(Status::NotFound, None, None);
+        let response = Response::new(Status::NotFound, None, None, false);
         let expected = b"HTTP/1.1 404 Not Found\r
 Content-Length: 0\r
 \r

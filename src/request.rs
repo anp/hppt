@@ -152,6 +152,10 @@ impl Request {
     pub fn uri(&self) -> &Uri {
         &self.uri
     }
+
+    pub fn query(&self) -> Option<&Query> {
+        self.query.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

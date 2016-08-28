@@ -1,3 +1,3 @@
 #!/usr/bin/env python3
 
-print('Hello, World!')
+print('Content-Type: text/plain\r\n\r\nHello, World!')
