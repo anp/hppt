@@ -52,50 +52,85 @@ const BUF_SIZE: usize = 1024; // 1KB
 fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
     where C: Read + Write
 {
+
     let mut buf = [0; BUF_SIZE];
-    let response = match Request::from_bytes(&mut connection, &mut buf) {
+    let mut buf_offset = 0;
+    let mut error = None;
 
-        Ok(req) => {
+    loop {
+        let bytes_read = try!(connection.read(&mut buf[buf_offset..]));
 
-            if req.method() == Method::Get {
-                let uri: &OsStr = req.uri().as_ref();
+        buf_offset += bytes_read;
 
-                if let Some((file, full_path)) = find_file_relative(&root_dir, Path::new(uri)) {
-                    let is_cgi = req.uri().starts_with("cgi-bin");
+        // handle full buffer
+        if buf_offset == buf.len() {
 
-                    if is_cgi {
+            error = Some(HpptError::RequestTooLarge);
+            break;
 
-                        build_cgi_response(&req, &full_path)
+        } else if bytes_read == 0 {
+            break;
+        }
+    }
 
-                    } else {
-                        Response::new(Status::Ok,
-                                      Some(Box::new(file)),
-                                      Some(ContentType::from_path(req.uri())),
-                                      false)
-                    }
-                } else {
-                    Response::new(Status::NotFound, None, None, false)
-                }
-
-            } else {
-                // we don't support anything other than GET right now
-                Response::new(Status::NotImplemented, None, None, false)
+    let response = if let Some(e) = error {
+        match e {
+            HpptError::UnsupportedHttpVersion => {
+                Response::new(Status::HttpVersionNotSupported, None, None, false)
+            }
+            HpptError::Parsing => Response::new(Status::BadRequest, None, None, false),
+            HpptError::IoError(why) => {
+                error!("Internal I/O error: {:?}", why);
+                Response::new(Status::InternalServerError, None, None, false)
+            }
+            HpptError::RequestTooLarge => {
+                Response::new(Status::RequestEntityTooLarge, None, None, false)
             }
         }
+    } else {
+        match Request::from_bytes(&buf[..buf_offset]) {
 
-        Err(why) => {
-            match why {
-                HpptError::UnsupportedHttpVersion => {
-                    Response::new(Status::HttpVersionNotSupported, None, None, false)
+            Ok(req) => {
+
+                if req.method() == Method::Get {
+                    let uri: &OsStr = req.uri().as_ref();
+
+                    if let Some((file, full_path)) = find_file_relative(&root_dir, Path::new(uri)) {
+                        let is_cgi = req.uri().starts_with("cgi-bin");
+
+                        if is_cgi {
+
+                            build_cgi_response(&req, &full_path)
+
+                        } else {
+                            Response::new(Status::Ok,
+                                          Some(Box::new(file)),
+                                          Some(ContentType::from_path(req.uri())),
+                                          false)
+                        }
+                    } else {
+                        Response::new(Status::NotFound, None, None, false)
+                    }
+
+                } else {
+                    // we don't support anything other than GET right now
+                    Response::new(Status::NotImplemented, None, None, false)
                 }
-                HpptError::Parsing => Response::new(Status::BadRequest, None, None, false),
-                HpptError::IoError(why) => {
-                    error!("Internal I/O error: {:?}", why);
-                    Response::new(Status::InternalServerError, None, None, false)
-                }
-                HpptError::BadRequest => Response::new(Status::BadRequest, None, None, false),
-                HpptError::RequestTooLarge => {
-                    Response::new(Status::RequestEntityTooLarge, None, None, false)
+            }
+
+            Err(why) => {
+                match why {
+                    HpptError::UnsupportedHttpVersion => {
+                        Response::new(Status::HttpVersionNotSupported, None, None, false)
+                    }
+                    HpptError::Parsing => Response::new(Status::BadRequest, None, None, false),
+                    HpptError::IoError(why) => {
+                        error!("Internal I/O error: {:?}", why);
+                        Response::new(Status::InternalServerError, None, None, false)
+                    }
+                    HpptError::RequestTooLarge => {
+                        Response::new(Status::RequestEntityTooLarge, None, None, false)
+                    }
                 }
             }
         }
@@ -373,7 +408,8 @@ Content-Type: text/plain\r
 
         for _ in 0..100 {
 
-            let response = server.make_request(&format!("GET /{} HTTP/1.1\r\n", &filename).as_bytes());
+            let response =
+                server.make_request(&format!("GET /{} HTTP/1.1\r\n", &filename).as_bytes());
             check_bytes_utf8(&expected, &response);
         }
     }
