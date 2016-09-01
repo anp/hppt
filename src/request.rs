@@ -10,7 +10,7 @@ pub struct Request<'a> {
     query: Option<Query<'a>>,
     version: Version,
     header_lines: Vec<&'a str>,
-    body: &'a [u8],
+    pub body: &'a [u8],
 }
 
 impl<'a> Request<'a> {

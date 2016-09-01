@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Receiver;
 
 use mioco;
@@ -142,8 +142,28 @@ fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
 }
 
 fn build_cgi_response(req: &Request, exe_file: &Path) -> Response {
-    match build_command(&req, &exe_file).output() {
-        Ok(output) => {
+    match spawn_command(&req, &exe_file) {
+        Ok(mut process) => {
+
+            // write the request body to stdin
+            // scope needed to limit stdin's borrow, wait_with_output takes process by value
+            {
+                let mut stdin = match process.stdin {
+                    Some(ref mut stdin) => stdin,
+                    None => return Response::new(Status::InternalServerError, None, None, false),
+                };
+
+                match stdin.write_all(req.body) {
+                    Ok(()) => (),
+                    Err(_) => return Response::new(Status::InternalServerError, None, None, false),
+                }
+            }
+
+            let output = match process.wait_with_output() {
+                Ok(o) => o,
+                Err(_) => return Response::new(Status::InternalServerError, None, None, false),
+            };
+
             if output.status.success() {
                 Response::new(Status::Ok,
                               Some(Box::new(Cursor::new(output.stdout))),
@@ -160,8 +180,12 @@ fn build_cgi_response(req: &Request, exe_file: &Path) -> Response {
     }
 }
 
-fn build_command(req: &Request, exe_file: &Path) -> Command {
+fn spawn_command(req: &Request, exe_file: &Path) -> HpptResult<Child> {
     let mut cmd = Command::new(exe_file);
+
+    // we want to buffer the input and output of the process
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
 
     cmd.env("SERVER_SOFTWARE",
             concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")));
@@ -177,7 +201,7 @@ fn build_command(req: &Request, exe_file: &Path) -> Command {
         cmd.env("QUERY_STRING", query_str);
     }
 
-    cmd
+    Ok(try!(cmd.spawn()))
 }
 
 #[cfg(test)]
@@ -469,6 +493,19 @@ Content-Type: text/plain\r
 \r
 Hello, World!
 ",
+                         &response);
+    }
+
+    #[test]
+    fn cgi_post() {
+        let server = TestServerHandle::new();
+
+        let response =
+            server.make_request(b"GET /cgi-bin/post_echo.py HTTP/1.1\r\n\r\nTHIS IS SOME INPUT");
+
+        check_bytes_utf8(b"HTTP/1.1 200 OK\r
+\r
+THIS IS SOME INPUT",
                          &response);
     }
 
