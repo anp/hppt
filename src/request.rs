@@ -4,27 +4,27 @@ use std::str::from_utf8;
 
 use error::{HpptResult, HpptError};
 
-pub const BUF_SIZE: usize = 1024; // 1KB
-
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Request {
+pub struct Request<'a> {
     method: Method,
     uri: Uri,
     query: Option<Query>,
     version: Version,
+    header_lines: Vec<String>,
+    body: &'a [u8],
 }
 
-impl Request {
-    pub fn from_bytes<R>(reader: &mut R) -> HpptResult<Request>
+impl<'a> Request<'a> {
+    pub fn from_bytes<R>(reader: &mut R, buf: &'a mut [u8]) -> HpptResult<Request<'a>>
         where R: Read
     {
         let mut buf_offset = 0;
-        let mut buf = [0u8; BUF_SIZE];
 
         // read from the least read offset until the buffer is either full
         // or we're out of bytes to read
 
         loop {
+
             let bytes_read = try!(reader.read(&mut buf[buf_offset..]));
 
             buf_offset += bytes_read;
@@ -44,104 +44,127 @@ impl Request {
                 return Err(HpptError::BadRequest);
             }
 
-            let bytes = &buf[..buf_offset];
-
             // standard says \r\n is the line terminator, but there are many non-conforming impls
             // so we'll split on newlines, and then trim the \r
-            let mut lines = bytes.split(|&b| b == b'\n')
-                .map(|l| {
-                    if l.len() == 0 {
-                        l
-                    } else if l[l.len() - 1] == b'\r' {
-                        &l[0..l.len() - 1]
-                    } else {
-                        l
-                    }
-                });
 
-            // first line is the method/uri/version
-            let request_line = match lines.next() {
-                Some(l) => l,
-                None => continue,
-            };
+            let method;
+            let uri;
+            let query;
+            let version;
+            let headers;
+            let mut body_start = 0;
 
-            let mut request_line_tokens = request_line.split(|&b| b == b' ');
-
-            let method = match request_line_tokens.next() {
-                Some(m) => {
-                    match Method::from_bytes(m) {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    }
-                }
-                None => continue,
-            };
-
-            let (uri, query) = match request_line_tokens.next() {
-                Some(mut u) => {
-                    // URIs must have at least one character
-                    if u.len() > 0 {
-                        // TODO validate URI has a protocol and known domain/is a relative path/etc.
-
-                        // joining this uri onto an OS path won't work if has a preceding slash
-                        if u[0] == b'/' {
-                            u = &u[1..];
+            {
+                let bytes = &buf[..buf_offset];
+                let mut lines = bytes.split(|&b| b == b'\n')
+                    .map(|l| {
+                        if l.len() == 0 {
+                            l
+                        } else if l[l.len() - 1] == b'\r' {
+                            body_start += l.len() + 1; // the \n byte was stripped
+                            &l[0..l.len() - 1]
+                        } else {
+                            body_start += l.len() + 1; // the \n byte was stripped
+                            l
                         }
+                    });
 
-                        let uri = match from_utf8(u) {
-                            Ok(s) => s,
+                // first line is the method/uri/version
+                let request_line = match lines.next() {
+                    Some(l) => l,
+                    None => continue,
+                };
+
+                let mut request_line_tokens = request_line.split(|&b| b == b' ');
+
+                method = match request_line_tokens.next() {
+                    Some(m) => {
+                        match Method::from_bytes(m) {
+                            Ok(m) => m,
                             Err(_) => continue,
-                        };
-
-                        let mut halves = uri.split('?');
-
-                        let uri = match halves.next() {
-                            Some(u) => Uri(u.to_string()),
-                            None => continue, // we need a first half of the URI
-                        };
-
-                        // but the post ? part of the URI is optional
-                        let query = match halves.next() {
-                            Some(q) => {
-                                if q.len() > 0 {
-                                    Some(Query(q.to_string()))
-                                } else {
-                                    None
-                                }
-                            }
-                            None => None,
-                        };
-
-                        (uri, query)
-
-                    } else {
-                        // this isn't an incomplete request -- we were able to get the next
-                        // space-separated token but it's 0-length
-                        return Err(HpptError::Parsing);
-                    }
-                }
-                None => continue,
-            };
-
-            let version = match request_line_tokens.next() {
-                Some(v) => {
-                    match Version::from_bytes(v) {
-                        Ok(v) => v,
-                        Err(HpptError::UnsupportedHttpVersion) => {
-                            return Err(HpptError::UnsupportedHttpVersion)
                         }
-                        Err(_) => continue,
                     }
-                }
-                None => continue,
-            };
+                    None => continue,
+                };
 
-            return Ok(Request {
+                match request_line_tokens.next() {
+                    Some(mut u) => {
+                        // URIs must have at least one character
+                        if u.len() > 0 {
+
+                            // joining this uri onto an OS path won't work if has a preceding slash
+                            if u[0] == b'/' {
+                                u = &u[1..];
+                            }
+
+                            let uri_fromstr = match from_utf8(u) {
+                                Ok(s) => s,
+                                Err(_) => continue,
+                            };
+
+                            let mut halves = uri_fromstr.split('?');
+
+                            let uri_parsed = match halves.next() {
+                                Some(u) => Uri(u.to_string()),
+                                None => continue, // we need a first half of the URI
+                            };
+
+                            // but the post ? part of the URI is optional
+                            let query_parsed = match halves.next() {
+                                Some(q) => {
+                                    if q.len() > 0 {
+                                        Some(Query(q.to_string()))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => None,
+                            };
+
+                            uri = uri_parsed;
+                            query = query_parsed;
+
+                        } else {
+                            // this isn't an incomplete request -- we were able to get the next
+                            // space-separated token but it's 0-length
+                            return Err(HpptError::Parsing);
+                        }
+                    }
+                    None => continue,
+                }
+
+                version = match request_line_tokens.next() {
+                    Some(v) => {
+                        match Version::from_bytes(v) {
+                            Ok(v) => v,
+                            Err(HpptError::UnsupportedHttpVersion) => {
+                                return Err(HpptError::UnsupportedHttpVersion)
+                            }
+                            Err(_) => continue,
+                        }
+                    }
+                    None => continue,
+                };
+
+                // SIDE EFFECTFUL -- parsing each line will increment out body_start value
+                headers = lines.take_while(|l| l.len() > 0)
+                    .map(|l| String::from_utf8_lossy(l).into_owned())
+                    .collect::<Vec<_>>();
+
+            }
+
+            let request = Request {
                 method: method,
                 uri: uri,
                 query: query,
                 version: version,
-            });
+                header_lines: headers,
+                body: &buf[body_start..buf_offset],
+            };
+
+            debug!("request parsed: {:?}", &request);
+
+            return Ok(request);
         }
     }
 
@@ -232,8 +255,6 @@ pub enum Version {
 impl Version {
     pub fn from_bytes(version: &[u8]) -> HpptResult<Self> {
 
-        // TODO find a way to differentiate between a partially filled version and an incorrect one
-
         // only support HTTP/1.1 at the moment
         match version {
             b"HTTP/1.1" => Ok(Version::OneDotOne),
@@ -255,25 +276,31 @@ mod test {
             uri: Uri("".to_string()),
             query: None,
             version: Version::OneDotOne,
+            body: b"",
+            header_lines: Vec::new(),
         };
 
-        let request = Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
 
         assert_eq!(request, expected);
     }
 
     #[test]
     fn successful_post() {
-        let mut request_bytes = "POST /posturi HTTP/1.1\r\nKey1=Value1&Key2=Value2+SpacedValue\r\n"
+        let mut request_bytes = "POST /posturi HTTP/1.1\r\n\r\nKey1=Value1&Key2=Value2+SpacedValue"
             .as_bytes();
         let expected = Request {
             method: Method::Post,
             uri: Uri("posturi".to_string()),
             query: None,
             version: Version::OneDotOne,
+            body: b"Key1=Value1&Key2=Value2+SpacedValue",
+            header_lines: Vec::new(),
         };
 
-        let request = Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
 
         assert_eq!(request, expected);
     }
@@ -287,9 +314,12 @@ mod test {
             uri: Uri("extended/path".to_string()),
             query: None,
             version: Version::OneDotOne,
+            body: b"",
+            header_lines: vec![String::from("Accept-Charset: utf-8")],
         };
 
-        let request = Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
 
         assert_eq!(request, expected);
     }
@@ -306,9 +336,12 @@ Accept-Charset: utf-8\r
             uri: Uri("extended/path".to_string()),
             query: Some(Query("key1=val1&key2=val2".to_string())),
             version: Version::OneDotOne,
+            body: b"",
+            header_lines: vec![String::from("Accept-Charset: utf-8")],
         };
 
-        let request = Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
 
         assert_eq!(request, expected);
     }
@@ -325,9 +358,12 @@ Accept-Charset: utf-8\r
             uri: Uri("extended/path".to_string()),
             query: None,
             version: Version::OneDotOne,
+            body: b"",
+            header_lines: vec![String::from("Accept-Charset: utf-8")],
         };
 
-        let request = Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
 
         assert_eq!(request, expected);
     }
@@ -341,9 +377,12 @@ Accept-Charset: utf-8\r
             uri: Uri("extended/path".to_string()),
             query: None,
             version: Version::OneDotOne,
+            body: b"",
+            header_lines: vec![String::from("Accept-Charset: utf-8")],
         };
 
-        let request = Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
 
         assert_eq!(request, expected);
     }
@@ -352,49 +391,56 @@ Accept-Charset: utf-8\r
     #[should_panic]
     fn fail_empty() {
         let mut request_bytes = "".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn fail_only_newlines() {
         let mut request_bytes = "\r\n\r\n".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn fail_bad_version() {
         let mut request_bytes = "GET / HTTP/0.9\r\n\r\n".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn fail_bad_method() {
         let mut request_bytes = "HRY / HTTP/1.1\r\n\r\n".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn fail_no_method() {
         let mut request_bytes = " / HTTP/1.1\r\n\r\n".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn fail_missing_uri() {
         let mut request_bytes = "GET HTTP/1.1\r\n\r\n".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn fail_empty_uri() {
         let mut request_bytes = "GET  HTTP/1.1\r\n\r\n".as_bytes();
-        Request::from_bytes(&mut request_bytes).unwrap();
+        let mut buf = [0; 1024];
+        let request = Request::from_bytes(&mut request_bytes, &mut buf).unwrap();
     }
 
     // TODO test header parsing

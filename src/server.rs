@@ -47,10 +47,13 @@ pub fn run(listener: TcpListener,
     Ok(())
 }
 
+const BUF_SIZE: usize = 1024; // 1KB
+
 fn handle_request<C>(mut connection: C, root_dir: PathBuf) -> HpptResult<()>
     where C: Read + Write
 {
-    let response = match Request::from_bytes(&mut connection) {
+    let mut buf = [0; BUF_SIZE];
+    let response = match Request::from_bytes(&mut connection, &mut buf) {
 
         Ok(req) => {
 
@@ -280,7 +283,7 @@ mod test {
     fn not_found() {
         let server = TestServerHandle::new();
 
-        let response = server.make_request(b"GET /DOES_NOT_EXIST HTTP/1.1");
+        let response = server.make_request(b"GET /DOES_NOT_EXIST HTTP/1.1\r\n");
 
         check_bytes_utf8(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
                          &response);
@@ -292,7 +295,7 @@ mod test {
 
         let filename = "Cargo.toml";
 
-        let response = server.make_request(&format!("GET /{} HTTP/1.1", &filename).as_bytes());
+        let response = server.make_request(&format!("GET /{} HTTP/1.1\r\n", &filename).as_bytes());
 
         let mut expected = Vec::new();
 
@@ -314,7 +317,7 @@ Content-Type: text/plain\r
 
         let filename = "test/foo.html";
 
-        let response = server.make_request(&format!("GET /{} HTTP/1.1", &filename).as_bytes());
+        let response = server.make_request(&format!("GET /{} HTTP/1.1\r\n", &filename).as_bytes());
 
         let mut expected = Vec::new();
 
@@ -336,7 +339,7 @@ Content-Type: text/html\r
 
         let filename = "test/1k.bin";
 
-        let response = server.make_request(&format!("GET /{} HTTP/1.1", &filename).as_bytes());
+        let response = server.make_request(&format!("GET /{} HTTP/1.1\r\n", &filename).as_bytes());
 
         let mut expected = Vec::new();
 
@@ -370,7 +373,7 @@ Content-Type: text/plain\r
 
         for _ in 0..100 {
 
-            let response = server.make_request(&format!("GET /{} HTTP/1.1", &filename).as_bytes());
+            let response = server.make_request(&format!("GET /{} HTTP/1.1\r\n", &filename).as_bytes());
             check_bytes_utf8(&expected, &response);
         }
     }
@@ -383,7 +386,7 @@ Content-Type: text/plain\r
         let mut request = Vec::new();
         request.extend_from_slice(b"GET /");
         request.extend_from_slice(&[b'a'; 1024]);
-        request.extend_from_slice(b" HTTP/1.1");
+        request.extend_from_slice(b" HTTP/1.1\r\n");
 
         let _response = server.make_request(&request);
     }
@@ -392,14 +395,14 @@ Content-Type: text/plain\r
     fn unimplemented() {
         let server = TestServerHandle::new();
 
-        let unsupported_requests = ["PUT / HTTP/1.1",
-                                    "OPTIONS / HTTP/1.1",
-                                    "HEAD / HTTP/1.1",
-                                    "POST / HTTP/1.1",
-                                    "PUT / HTTP/1.1",
-                                    "DELETE / HTTP/1.1",
-                                    "TRACE / HTTP/1.1",
-                                    "CONNECT / HTTP/1.1"];
+        let unsupported_requests = ["PUT / HTTP/1.1\r\n",
+                                    "OPTIONS / HTTP/1.1\r\n",
+                                    "HEAD / HTTP/1.1\r\n",
+                                    "POST / HTTP/1.1\r\n",
+                                    "PUT / HTTP/1.1\r\n",
+                                    "DELETE / HTTP/1.1\r\n",
+                                    "TRACE / HTTP/1.1\r\n",
+                                    "CONNECT / HTTP/1.1\r\n"];
 
         for request in unsupported_requests.iter() {
             let response = server.make_request(&request.as_bytes());
@@ -413,7 +416,7 @@ Content-Type: text/plain\r
     fn wrong_http_version() {
         let server = TestServerHandle::new();
 
-        let response = server.make_request(b"GET / HTTP/1.0");
+        let response = server.make_request(b"GET / HTTP/1.0\r\n");
 
         check_bytes_utf8(b"HTTP/1.1 505 HTTP Version not supported\r\nContent-Length: 0\r\n\r\n",
                          &response);
@@ -423,7 +426,7 @@ Content-Type: text/plain\r
     fn cgi_hello_world() {
         let server = TestServerHandle::new();
 
-        let response = server.make_request(b"GET /cgi-bin/hello_world.py HTTP/1.1");
+        let response = server.make_request(b"GET /cgi-bin/hello_world.py HTTP/1.1\r\n");
 
         check_bytes_utf8(b"HTTP/1.1 200 OK\r
 Content-Type: text/plain\r
@@ -437,7 +440,7 @@ Hello, World!
     fn cgi_addition_success() {
         let server = TestServerHandle::new();
 
-        let response = server.make_request(b"GET /cgi-bin/addition.py?num1=1&num2=10 HTTP/1.1");
+        let response = server.make_request(b"GET /cgi-bin/addition.py?num1=1&num2=10 HTTP/1.1\r\n");
 
         check_bytes_utf8(b"HTTP/1.1 200 OK\r
 Content-Type:text/html\r
@@ -453,7 +456,7 @@ Content-Type:text/html\r
         let server = TestServerHandle::new();
 
         let response =
-            server.make_request(b"GET /cgi-bin/addition.py?num1=banana&num2=pie HTTP/1.1");
+            server.make_request(b"GET /cgi-bin/addition.py?num1=banana&num2=pie HTTP/1.1\r\n");
 
         check_bytes_utf8(b"HTTP/1.1 400 Bad Request\r
 Content-Type:text/html\r
